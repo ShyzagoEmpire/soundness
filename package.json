@@ -1,7 +1,7 @@
 {
-  "name": "discord-8queens-automation",
+  "name": "soundness",
   "version": "3.0.0",
-  "description": "Automated Discord 8Queens puzzle solver with blockchain integration",
+  "description": "Kontol",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -43,6 +43,6 @@
     "blockchain",
     "typescript"
   ],
-  "author": "Your Name",
+  "author": "Shyzago",
   "license": "MIT"
 }
