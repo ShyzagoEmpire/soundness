@@ -1,4 +1,4 @@
-# Discord 8Queens Automation
+# Soundness
 
 A TypeScript automation tool for Discord's 8Queens puzzle game with integrated blockchain transaction processing. Features smart account management, failure tracking, and continuous operation.
 
@@ -34,7 +34,7 @@ A TypeScript automation tool for Discord's 8Queens puzzle game with integrated b
 ```bash
 # Clone and setup
 git clone https://github.com/ShyzagoEmpire/soundness
-cd discord-8queens-automation
+cd soundness
 npm install
 
 # Environment configuration
@@ -52,18 +52,24 @@ npm start
 
 ```env
 # Discord Configuration
-GUILD_ID=your_guild_id
-BOT_ID=your_bot_application_id
-GENERAL_CHANNEL_ID=your_primary_channel_id
-FALLBACK_CHANNEL_ID=your_fallback_channel_id
+GUILD_ID=1341336526713257984
+BOT_ID=1399503586651668480
+GENERAL_CHANNEL_ID=1341336527296401410
+FALLBACK_CHANNEL_ID=1391039818988916768
 
 # Role Requirements (comma-separated)
-REQUIRED_ROLES=role_id_1,role_id_2
-SPECIAL_ROLES=special_role_id_1,special_role_id_2
+REQUIRED_ROLES=1351811717042016358,1371585936789606451
+SPECIAL_ROLES=1397143403447451741,1397569441910489199,1397235702810546228,1397836509754822772,1397470961867034644
+
+# File Configuration
+ACCOUNTS_FILE=./data/accounts.json
 
 # Timing Configuration (milliseconds)
-RETRY_INTERVAL=3600000  # 1 hour
-COMMAND_DELAY=2000      # 2 seconds
+RETRY_INTERVAL=3600000
+COMMAND_DELAY=2000
 
-# File and API Configuration
-ACCOUNTS_FILE=./data/accounts.json
+# API Configuration
+API_BASE_URL=https://fun.soundness.xyz
+
+# CLI Configuration (REQUIRED)
+CLI_PASSWORD=your_secure_password_here
