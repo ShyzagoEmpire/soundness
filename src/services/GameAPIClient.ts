@@ -64,8 +64,6 @@ export class GameAPIClient {
    * @returns CLI command data when ready
    */
   public async pollForCLICommand(victoryUrl: string): Promise<CLIData> {
-    console.log(`   🔗 Polling victory URL: ${victoryUrl}`);
-    
     let attemptCount = 0;
     const maxAttempts = 2160;
     const startTime = Date.now();
