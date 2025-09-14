@@ -10,7 +10,7 @@ import { AccountData } from '../types';
 import { config } from '../config/environment';
 
 /**
- * Main automation engine that orchestrates the entire 8Queens automation workflow
+ * Main automation engine with zero redundancy and optimized performance
  */
 export class AutomationEngine {
   private accountManager: AccountManager;
@@ -87,18 +87,18 @@ export class AutomationEngine {
    */
   private async checkExistingAccountsAndPrompt(): Promise<boolean> {
     const existingAccounts = this.accountManager.getAccounts();
-    const readyAccounts = existingAccounts.filter(acc => 
-      acc.id && acc.token && acc.status === 'ready'
+    const confirmedAccounts = existingAccounts.filter(acc => 
+      acc.id && acc.token && acc.status === 'confirmed'
     );
 
-    if (readyAccounts.length === 0) {
-      console.log('📋 No existing ready accounts found');
+    if (confirmedAccounts.length === 0) {
+      console.log('📋 No existing confirmed accounts found');
       return true;
     }
 
-    console.log(`📋 Found ${readyAccounts.length} existing ready account(s):`);
-    readyAccounts.forEach(acc => {
-      console.log(`   👤 ${acc.username} (${acc.globalName}) - Status: ${acc.status}`);
+    console.log(`📋 Found ${confirmedAccounts.length} existing confirmed account(s):`);
+    confirmedAccounts.forEach(acc => {
+      console.log(`   👤 ${acc.username} (${acc.globalName}) - Status: ${acc.status} - Channel: ${acc.executableChannel}`);
     });
 
     const { addMoreAccounts } = await inquirer.prompt([{
@@ -172,9 +172,12 @@ export class AutomationEngine {
       const accountData = await this.discordClient.validateAccount(token);
       if (accountData) {
         this.accountManager.addOrUpdateAccount(accountData);
-        console.log(`✅ Account ${accountData.username} validated successfully`);
+        const statusText = accountData.status === 'confirmed' 
+          ? `confirmed (${accountData.executableChannel} channel)` 
+          : 'pending';
+        console.log(`✅ Account ${accountData.username} validated successfully - ${statusText}`);
       } else {
-        console.log('❌ Failed to validate token - discarding');
+        console.log('❌ Failed to validate token - token discarded');
       }
 
       if (i < tokens.length - 1) {
@@ -200,20 +203,38 @@ export class AutomationEngine {
   }
 
   /**
-   * Executes single automation cycle
+   * Executes single automation cycle with optimized account management
    */
   private async runCycle(): Promise<void> {
     const cycleStart = new Date();
     console.log(`\n⏰ Cycle started at ${cycleStart.toLocaleString()}\n`);
 
     try {
-      await this.executeProfileCommands();
-      const gamesWerePlayed = await this.execute8QueensCommands();
+      let accountsModified = false;
+
+      // Handle pending accounts first
+      if (await this.handlePendingAccounts()) {
+        accountsModified = true;
+      }
       
-      if (gamesWerePlayed) {
-        await this.postGameProfileSync();
+      // Execute 8queens for confirmed accounts
+      const gamesResult = await this.execute8QueensCommands();
+      if (gamesResult.accountsModified) {
+        accountsModified = true;
+      }
+      
+      if (gamesResult.gamesPlayed) {
+        // Update profiles after gaming to get latest stats
+        if (await this.executeProfileCommands()) {
+          accountsModified = true;
+        }
       } else {
-        console.log('📊 Skipping post-game profile sync (no games played)\n');
+        console.log('📊 Skipping profile sync (no games played)\n');
+      }
+
+      // Save accounts only once per cycle if any changes were made
+      if (accountsModified) {
+        this.accountManager.saveAccounts();
       }
 
       const nextCycle = new Date(Date.now() + config.RETRY_INTERVAL);
@@ -227,151 +248,126 @@ export class AutomationEngine {
   }
 
   /**
-   * Executes profile commands for account synchronization
+   * Gets confirmed accounts with validation
    */
-  private async executeProfileCommands(): Promise<void> {
-    console.log('👤 Executing /profile commands...\n');
+  private getConfirmedAccounts(): AccountData[] | null {
+    const confirmedAccounts = this.accountManager.getAccountsByStatus('confirmed');
+    
+    if (confirmedAccounts.length === 0) {
+      console.log('✅ No confirmed accounts found');
+      return null;
+    }
+    
+    return confirmedAccounts;
+  }
 
-    const accountsNeedingProfileSync = [
-      ...this.accountManager.getAccountsByStatus('validated'),
-      ...this.accountManager.getAccountsByStatus('ready')
-    ];
-
-    if (accountsNeedingProfileSync.length === 0) {
-      console.log('📋 No accounts need profile sync');
-      return;
+  /**
+   * Handles pending accounts by attempting revalidation
+   */
+  private async handlePendingAccounts(): Promise<boolean> {
+    const pendingAccounts = this.accountManager.getAccountsByStatus('pending');
+    
+    if (pendingAccounts.length === 0) {
+      return false;
     }
 
-    for (const account of accountsNeedingProfileSync) {
-      console.log(`Syncing profile for ${account.username}...`);
+    console.log(`🔄 Processing ${pendingAccounts.length} pending account(s)...\n`);
+    let accountsModified = false;
+
+    for (const account of pendingAccounts) {
+      console.log(`Revalidating ${account.username}...`);
 
       try {
-        const response = await this.discordClient.executeSlashCommand(account, 'profile');
+        const revalidatedAccount = await this.discordClient.revalidatePendingAccount(account);
         
-        if (response) {
-          if (this.discordClient.isAccessRestricted(response)) {
-            console.log(`🔒 Access restricted for ${account.username} - account validation inconsistency`);
-            const wasRemoved = this.accountManager.markAccountFailure(account.id, 'Access restricted after successful validation');
-            if (wasRemoved) {
-              console.log(`💡 Manual check needed: Try sending /profile manually in Discord with account ${account.username} - there might be an issue`);
-            }
-            continue;
-          }
-
-          const stats = this.discordClient.parseProfileStats(response);
-          if (stats) {
-            account.canAccessGeneral = true;
-            account.status = 'ready';
-            account.stats = stats;
-            this.accountManager.addOrUpdateAccount(account);
-            this.accountManager.resetAccountFailures(account.id);
-            console.log(`✅ Profile synced for ${account.username} - ${stats.played} games played, ${stats.wins} wins`);
-          } else {
-            console.log(`⚠️ Could not parse profile stats for ${account.username}`);
-            const wasRemoved = this.accountManager.markAccountFailure(account.id, 'Failed to parse profile stats');
-            if (wasRemoved) {
-              console.log(`💡 Manual check needed: Try sending /profile manually in Discord with account ${account.username} - there might be an issue`);
-            }
-          }
+        if (!revalidatedAccount) {
+          // Account should be removed
+          this.accountManager.removeAccount(account.id);
+          console.log(`❌ Removed ${account.username} - failed revalidation`);
+          accountsModified = true;
+        } else if (revalidatedAccount.status === 'confirmed') {
+          // Account was promoted to confirmed
+          this.accountManager.addOrUpdateAccount(revalidatedAccount);
+          console.log(`✅ ${account.username} promoted to confirmed status (${revalidatedAccount.executableChannel} channel)`);
+          accountsModified = true;
         } else {
-          console.log(`⚠️ No response received for ${account.username}`);
-          const wasRemoved = this.accountManager.markAccountFailure(account.id, 'No response received from Discord');
-          if (wasRemoved) {
-            console.log(`💡 Manual check needed: Try sending /profile manually in Discord with account ${account.username} - there might be an issue`);
-          }
+          // Account remains pending
+          console.log(`⏳ ${account.username} remains pending`);
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.log(`⚠️ Profile sync failed for ${account.username}: ${errorMessage}`);
-        const wasRemoved = this.accountManager.markAccountFailure(account.id, `Profile sync error: ${errorMessage}`);
-        if (wasRemoved) {
-          console.log(`💡 Manual check needed: Try sending /profile manually in Discord with account ${account.username} - there might be an issue`);
-        }
+        console.log(`⚠️ Revalidation error for ${account.username}: ${errorMessage}`);
       }
 
       await this.delay(config.COMMAND_DELAY);
     }
 
-    this.accountManager.saveAccounts();
-    console.log('\n📊 Profile sync complete!\n');
+    if (accountsModified) {
+      console.log('\n📊 Pending accounts processing complete!\n');
+    }
+    return accountsModified;
   }
 
   /**
-   * Executes 8queens commands for all ready accounts
+   * Executes 8queens commands for confirmed accounts only
    */
-  private async execute8QueensCommands(): Promise<boolean> {
+  private async execute8QueensCommands(): Promise<{ gamesPlayed: boolean; accountsModified: boolean }> {
     console.log('🎮 Executing /8queens commands...\n');
 
-    const readyAccounts = this.accountManager.getAccountsByStatus('ready');
-
-    if (readyAccounts.length === 0) {
-      console.log('✅ No ready accounts found');
-      return false;
+    const confirmedAccounts = this.getConfirmedAccounts();
+    if (!confirmedAccounts) {
+      return { gamesPlayed: false, accountsModified: false };
     }
 
     let anyGamesPlayed = false;
+    let accountsModified = false;
 
-    for (const account of readyAccounts) {
+    for (const account of confirmedAccounts) {
       console.log(`🎯 Playing 8queens for ${account.username}...`);
 
       const result = await this.executeGameSequence(account);
       
       if (result.success) {
         console.log(`✅ 8queens completed for ${account.username}`);
-        this.accountManager.resetAccountFailures(account.id);
         anyGamesPlayed = true;
       } else if (result.rateLimited) {
         console.log(`⏰ ${account.username} rate limited - too many games played recently (expected behavior)`);
-        this.accountManager.resetAccountFailures(account.id);
       } else if (result.accessRestricted) {
-        console.log(`🔒 ${account.username} access restricted - validation inconsistency detected`);
-        const wasRemoved = this.accountManager.markAccountFailure(account.id, 'Access restricted after successful validation');
-        if (wasRemoved) {
-          console.log(`💡 Manual check needed: Try sending /8queens manually in Discord with account ${account.username} - there might be an issue`);
-        }
+        console.log(`🔒 ${account.username} access restricted - bot role restriction (expected behavior)`);
       } else {
         console.log(`❌ 8queens failed for ${account.username}`);
-        const wasRemoved = this.accountManager.markAccountFailure(account.id, 'Failed to complete 8queens game');
-        if (wasRemoved) {
-          console.log(`💡 Manual check needed: Try sending /8queens manually in Discord with account ${account.username} - there might be an issue`);
-        }
       }
 
       await this.delay(config.COMMAND_DELAY);
     }
 
-    this.accountManager.saveAccounts();
     console.log('\n🎯 8queens execution complete!\n');
-    
-    return anyGamesPlayed;
+    return { gamesPlayed: anyGamesPlayed, accountsModified };
   }
 
   /**
    * Updates profile statistics after game completion
    */
-  private async postGameProfileSync(): Promise<void> {
-    console.log('📊 Post-game profile sync...\n');
+  private async executeProfileCommands(): Promise<boolean> {
+    console.log('📊 Updating post-game statistics...\n');
 
-    const readyAccounts = this.accountManager.getAccountsByStatus('ready');
-
-    if (readyAccounts.length === 0) {
-      console.log('📋 No ready accounts for post-game sync');
-      return;
+    const confirmedAccounts = this.getConfirmedAccounts();
+    if (!confirmedAccounts) {
+      console.log('📋 No confirmed accounts for stats update');
+      return false;
     }
 
-    for (const account of readyAccounts) {
-      console.log(`Updating stats for ${account.username}...`);
+    let accountsModified = false;
+
+    for (const account of confirmedAccounts) {
+      console.log(`📊 Updating stats for ${account.username}...`);
 
       try {
         const response = await this.discordClient.executeSlashCommand(account, 'profile');
         
         if (response) {
           if (this.discordClient.isAccessRestricted(response)) {
-            console.log(`🔒 ${account.username} access restricted during post-game sync - validation inconsistency`);
-            const wasRemoved = this.accountManager.markAccountFailure(account.id, 'Access restricted during post-game sync');
-            if (wasRemoved) {
-              console.log(`💡 Manual check needed: Try sending /profile manually in Discord with account ${account.username} - there might be an issue`);
-            }
+            console.log(`🔒 ${account.username} access restricted - bot role restriction (keeping account)`);
             continue;
           }
 
@@ -380,37 +376,34 @@ export class AutomationEngine {
             const oldStats = account.stats;
             account.stats = stats;
             this.accountManager.addOrUpdateAccount(account);
-            this.accountManager.resetAccountFailures(account.id);
+            accountsModified = true;
             
-            console.log(`✅ Stats updated for ${account.username}:`);
-            console.log(`   Games: ${oldStats.played} → ${stats.played} (+${stats.played - oldStats.played})`);
-            console.log(`   Wins: ${oldStats.wins} → ${stats.wins} (+${stats.wins - oldStats.wins})`);
-          } else {
-            const wasRemoved = this.accountManager.markAccountFailure(account.id, 'Failed to parse post-game profile stats');
-            if (wasRemoved) {
-              console.log(`💡 Manual check needed: Try sending /profile manually in Discord with account ${account.username} - there might be an issue`);
+            const gamesPlayed = stats.played - oldStats.played;
+            const winsGained = stats.wins - oldStats.wins;
+            
+            if (gamesPlayed > 0 || winsGained > 0) {
+              console.log(`✅ Stats updated for ${account.username}:`);
+              console.log(`   Games: ${oldStats.played} → ${stats.played} (+${gamesPlayed})`);
+              console.log(`   Wins: ${oldStats.wins} → ${stats.wins} (+${winsGained})`);
+            } else {
+              console.log(`📊 No stat changes for ${account.username}`);
             }
+          } else {
+            console.log(`⚠️ Could not parse stats for ${account.username}`);
           }
         } else {
-          const wasRemoved = this.accountManager.markAccountFailure(account.id, 'No response from post-game profile sync');
-          if (wasRemoved) {
-            console.log(`💡 Manual check needed: Try sending /profile manually in Discord with account ${account.username} - there might be an issue`);
-          }
+          console.log(`⚠️ No response received for ${account.username}`);
         }
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.log(`⚠️ Post-game stats update failed for ${account.username}: ${errorMessage}`);
-        const wasRemoved = this.accountManager.markAccountFailure(account.id, `Post-game sync error: ${errorMessage}`);
-        if (wasRemoved) {
-          console.log(`💡 Manual check needed: Try sending /profile manually in Discord with account ${account.username} - there might be an issue`);
-        }
+        console.log(`⚠️ Stats update failed for ${account.username}: ${errorMessage}`);
       }
 
       await this.delay(config.COMMAND_DELAY);
     }
 
-    this.accountManager.saveAccounts();
-    console.log('\n📊 Post-game profile sync complete!\n');
+    console.log('\n📊 Stats update complete!\n');
+    return accountsModified;
   }
 
   /**
@@ -431,7 +424,7 @@ export class AutomationEngine {
       }
 
       if (this.discordClient.isAccessRestricted(gameResponse)) {
-        console.log('   🔒 Access restricted - missing required role');
+        console.log('   🔒 Access restricted - bot role restriction');
         return { success: false, accessRestricted: true };
       }
 
@@ -444,19 +437,19 @@ export class AutomationEngine {
       const solution = this.gameSolver.getSolution();
       const stats = this.gameSolver.getStats();
 
-      console.log('   📤 Submitting solution...');
+      console.log('   📤 Submitting solution and waiting for victory URL...');
       const victoryUrl = await this.gameApiClient.submitGameCompletion(
         gameInfo.gameId,
         solution,
         stats
       );
 
-      console.log('   📄 Waiting for proof generation...');
-      const cliData = await this.gameApiClient.pollForCLICommand(victoryUrl);
+      console.log('   📄 Waiting for CLI command to be ready...');
+      const cliCommand = await this.gameApiClient.pollForCLICommand(victoryUrl);
 
       console.log('   ⚙️ Executing blockchain transaction...');
       const keyName = account.username.toLowerCase().replace(/[^a-z0-9]/g, '_');
-      await this.cliExecutor.executeCommand(cliData, keyName);
+      await this.cliExecutor.executeCommand(cliCommand, keyName);
 
       return { success: true };
     } catch (error) {

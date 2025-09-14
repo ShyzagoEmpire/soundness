@@ -13,10 +13,8 @@ export interface AccountData {
     winRate: number;
     badgesEarned: number;
   };
-  canAccessGeneral?: boolean;
-  status: 'validated' | 'ready';
-  lastError?: string;
-  failureCount?: number;
+  status: 'confirmed' | 'pending';
+  executableChannel: 'general' | 'fallback' | null;
 }
 
 /**
@@ -46,15 +44,6 @@ export interface GameStats {
   duration: string;
   efficiency: number;
   solution: boolean[][];
-}
-
-/**
- * CLI command data extracted from victory page
- */
-export interface CLIData {
-  cliCommand: string;
-  blobId?: string;
-  fullCommand: string;
 }
 
 /**

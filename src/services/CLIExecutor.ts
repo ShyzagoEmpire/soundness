@@ -1,5 +1,4 @@
 import * as pty from 'node-pty';
-import { CLIData } from '../types';
 import { config } from '../config/environment';
 
 /**
@@ -8,20 +7,20 @@ import { config } from '../config/environment';
 export class CLIExecutor {
   /**
    * Executes CLI command with dynamic key name substitution
-   * @param cliData - CLI command data from victory page
+   * @param command - CLI command string
    * @param keyName - Key name to use for transaction
    */
-  public async executeCommand(cliData: CLIData, keyName: string): Promise<void> {
+  public async executeCommand(command: string, keyName: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      const modifiedCommand = cliData.fullCommand.replace(
+      const modifiedCommand = command.replace(
         /--key-name="[^"]*"/,
         `--key-name="${keyName}"`
       );
 
       const parsedArgs = this.parseCommand(modifiedCommand);
-      const command = parsedArgs.shift();
+      const commandName = parsedArgs.shift();
 
-      if (!command) {
+      if (!commandName) {
         reject(new Error('No command found'));
         return;
       }
@@ -29,7 +28,7 @@ export class CLIExecutor {
       let fullOutput = '';
       let passwordSent = false;
 
-      const ptyProcess = pty.spawn(command, parsedArgs, {
+      const ptyProcess = pty.spawn(commandName, parsedArgs, {
         name: 'xterm-color',
         cols: 120,
         rows: 30,

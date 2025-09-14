@@ -3,7 +3,7 @@ import { AccountData, AccountsStorage } from '../types';
 import { config } from '../config/environment';
 
 /**
- * Manages account data persistence and failure tracking
+ * Manages account data persistence with simplified status handling
  */
 export class AccountManager {
   private accounts: AccountsStorage = {
@@ -11,8 +11,6 @@ export class AccountManager {
     lastUpdated: new Date().toISOString(),
     version: '3.0.0'
   };
-
-  private readonly MAX_FAILURE_COUNT = 3;
 
   constructor() {
     this.loadAccounts();
@@ -61,42 +59,6 @@ export class AccountManager {
   }
 
   /**
-   * Increments failure count for account and removes if limit exceeded
-   * @param accountId - Account ID to mark as failed
-   * @param errorMessage - Error message to store
-   * @returns True if account was removed due to failure limit
-   */
-  public markAccountFailure(accountId: string, errorMessage: string): boolean {
-    const account = this.accounts.accounts.find(acc => acc.id === accountId);
-    if (account) {
-      account.failureCount = (account.failureCount || 0) + 1;
-      account.lastError = errorMessage;
-      
-      console.log(`⚠️ ${account.username} failure count: ${account.failureCount}/${this.MAX_FAILURE_COUNT}`);
-      
-      if (account.failureCount >= this.MAX_FAILURE_COUNT) {
-        this.removeAccount(accountId);
-        console.log(`❌ Removed ${account.username} after ${this.MAX_FAILURE_COUNT} consecutive failures`);
-        return true;
-      }
-      
-      return false;
-    }
-    return false;
-  }
-
-  /**
-   * Resets failure count for successful operations
-   */
-  public resetAccountFailures(accountId: string): void {
-    const account = this.accounts.accounts.find(acc => acc.id === accountId);
-    if (account) {
-      account.failureCount = 0;
-      account.lastError = undefined;
-    }
-  }
-
-  /**
    * Removes account by ID
    */
   public removeAccount(accountId: string): boolean {
@@ -110,8 +72,8 @@ export class AccountManager {
    */
   public getAccountStats(): { [status: string]: number } {
     const stats = {
-      validated: 0,
-      ready: 0,
+      confirmed: 0,
+      pending: 0,
       total: this.accounts.accounts.length
     };
 
@@ -132,7 +94,7 @@ export class AccountManager {
       fs.writeJsonSync(config.ACCOUNTS_FILE, this.accounts, { spaces: 2 });
       
       const stats = this.getAccountStats();
-      console.log(`💾 Saved accounts: ${stats.validated} validated, ${stats.ready} ready (${stats.total} total)`);
+      console.log(`💾 Saved accounts: ${stats.confirmed} confirmed, ${stats.pending} pending (${stats.total} total)`);
     } catch (error) {
       console.error('❌ Failed to save accounts file:', error);
     }
@@ -148,7 +110,7 @@ export class AccountManager {
         this.accounts = data;
         
         const stats = this.getAccountStats();
-        console.log(`📂 Loaded ${stats.total} existing accounts: ${stats.validated} validated, ${stats.ready} ready`);
+        console.log(`📂 Loaded ${stats.total} existing accounts: ${stats.confirmed} confirmed, ${stats.pending} pending`);
       }
     } catch (error) {
       console.log('📂 No existing accounts file found, starting fresh');

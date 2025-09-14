@@ -3,15 +3,28 @@ import { AccountData, GameInfo } from '../types';
 import { config } from '../config/environment';
 
 /**
- * Handles Discord API interactions and command execution
+ * Handles Discord API interactions with enhanced validation and clean logging
  */
 export class DiscordClient {
   private readonly LOGIN_TIMEOUT = 30000;
 
   /**
-   * Validates Discord token and checks guild membership and roles
-   * @param token - Discord user token
-   * @returns Account data if validation successful, null otherwise
+   * Helper function to execute actions with retry logic
+   */
+  private async executeWithRetry<T>(action: () => Promise<T>, retries: number = 2): Promise<T> {
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await action();
+      } catch (error) {
+        console.log(`   ⚠️ Attempt ${i + 1} failed. Retrying...`);
+        if (i === retries - 1) throw error;
+      }
+    }
+    throw new Error('All retry attempts exhausted');
+  }
+
+  /**
+   * Validates Discord token with enhanced access restriction handling
    */
   public async validateAccount(token: string): Promise<AccountData | null> {
     const client = new Client();
@@ -36,74 +49,115 @@ export class DiscordClient {
 
       console.log(`   👤 Logged in as: ${user.username}`);
 
-      const guild = await this.withTimeout(
-        client.guilds.fetch(config.GUILD_ID),
-        10000,
-        'Guild fetch timeout'
-      ).catch(() => null);
-
-      if (!guild) {
-        console.log('   ⚠️ User not in guild or cannot access guild');
+      // Initial validation (Guild & Role checks)
+      const validationResult = await this.performInitialValidation(client, user);
+      if (!validationResult) {
+        console.log('   ❌ Initial validation failed - token will be discarded');
         return null;
       }
 
-      console.log(`   ✅ Found guild: ${guild.name}`);
+      // Try executing /profile in general channel with retry
+      console.log('   🎯 Testing /profile command in general channel...');
+      try {
+        const profileResponse = await this.executeWithRetry(async () => {
+          return await this.executeSlashCommandInternal(client, config.GENERAL_CHANNEL_ID, 'profile');
+        }, 2);
 
-      const member = await this.withTimeout(
-        guild.members.fetch(user.id),
-        10000,
-        'Member fetch timeout'
-      ).catch(() => null);
-
-      if (!member) {
-        console.log('   ⚠️ Could not fetch member data');
-        return null;
-      }
-
-      console.log('   🎭 Checking roles...');
-      const userRoles = member.roles.cache.map(role => role.id);
-      console.log(`   📋 User has ${userRoles.length} roles`);
-
-      const hasRequiredRoles = config.REQUIRED_ROLES.every(roleId => {
-        const hasRole = userRoles.includes(roleId);
-        if (!hasRole) {
-          console.log(`   ❌ Missing required role: ${roleId}`);
+        if (profileResponse) {
+          if (this.isAccessRestricted(profileResponse)) {
+            // Bot restricts access due to role, but Discord API works fine
+            const requiredRole = this.extractRequiredRole(profileResponse);
+            const userRole = this.getUserSpecialRole(validationResult.roles);
+            console.log(`   🔒 Bot access restricted: Your role is ${userRole}, but ${requiredRole} role is required`);
+            console.log('   ✅ General channel access confirmed (bot role restriction)');
+            
+            return {
+              ...validationResult,
+              stats: { played: 0, wins: 0, winRate: 0, badgesEarned: 0 },
+              status: 'confirmed',
+              executableChannel: 'general'
+            };
+          } else {
+            const stats = this.parseProfileStats(profileResponse);
+            if (stats) {
+              console.log('   ✅ General channel access confirmed');
+              return {
+                ...validationResult,
+                stats,
+                status: 'confirmed',
+                executableChannel: 'general'
+              };
+            }
+          }
         }
-        return hasRole;
-      });
+      } catch (error) {
+        console.log('   ⚠️ General channel failed, trying fallback logic...');
+      }
 
-      const hasSpecialRole = config.SPECIAL_ROLES.some(roleId => {
-        const hasRole = userRoles.includes(roleId);
-        if (hasRole) {
-          console.log(`   ✅ Has special role: ${roleId}`);
+      // Fallback Channel Logic
+      if (!config.FALLBACK_CHANNEL_ID) {
+        console.log('   ❌ No fallback channel configured');
+        return {
+          ...validationResult,
+          stats: { played: 0, wins: 0, winRate: 0, badgesEarned: 0 },
+          status: 'pending',
+          executableChannel: null
+        };
+      }
+
+      // Check permissions for fallback channel
+      const hasPermission = await this.checkFallbackChannelPermission(client, validationResult.roles);
+      if (!hasPermission) {
+        console.log('   ❌ No permission for fallback channel');
+        return {
+          ...validationResult,
+          stats: { played: 0, wins: 0, winRate: 0, badgesEarned: 0 },
+          status: 'pending',
+          executableChannel: null
+        };
+      }
+
+      // Try executing /profile in fallback channel with retry
+      console.log('   🎯 Testing /profile command in fallback channel...');
+      try {
+        const fallbackResponse = await this.executeWithRetry(async () => {
+          return await this.executeSlashCommandInternal(client, config.FALLBACK_CHANNEL_ID!, 'profile');
+        }, 2);
+
+        if (fallbackResponse) {
+          if (this.isAccessRestricted(fallbackResponse)) {
+            // Bot restricts access due to role, but Discord API works fine
+            const requiredRole = this.extractRequiredRole(fallbackResponse);
+            const userRole = this.getUserSpecialRole(validationResult.roles);
+            console.log(`   🔒 Bot access restricted: Your role is ${userRole}, but ${requiredRole} role is required`);
+            console.log('   ✅ Fallback channel access confirmed (bot role restriction)');
+            
+            return {
+              ...validationResult,
+              stats: { played: 0, wins: 0, winRate: 0, badgesEarned: 0 },
+              status: 'confirmed',
+              executableChannel: 'fallback'
+            };
+          } else {
+            const stats = this.parseProfileStats(fallbackResponse);
+            if (stats) {
+              console.log('   ✅ Fallback channel access confirmed');
+              return {
+                ...validationResult,
+                stats,
+                status: 'confirmed',
+                executableChannel: 'fallback'
+              };
+            }
+          }
         }
-        return hasRole;
-      });
-
-      if (!hasRequiredRoles) {
-        console.log('   ❌ Missing required roles');
-        return null;
+      } catch (error) {
+        console.log('   ❌ Fallback channel also failed');
       }
 
-      if (!hasSpecialRole) {
-        console.log('   ❌ Missing special roles');
-        return null;
-      }
-
-      console.log('   ✅ All role requirements met');
-
-      return {
-        id: user.id,
-        token: token,
-        username: user.username,
-        globalName: user.globalName || user.username,
-        roles: member.roles.cache.map(role => ({
-          id: role.id,
-          name: role.name
-        })),
-        stats: { played: 0, wins: 0, winRate: 0, badgesEarned: 0 },
-        status: 'validated'
-      };
+      // If all attempts failed, discard token
+      console.log('   ❌ All validation attempts failed - token will be discarded');
+      return null;
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -130,17 +184,189 @@ export class DiscordClient {
   }
 
   /**
+   * Revalidates pending accounts by checking fallback channel permissions
+   */
+  public async revalidatePendingAccount(account: AccountData): Promise<AccountData | null> {
+    if (!config.FALLBACK_CHANNEL_ID) {
+      return account; // Keep as pending if no fallback configured
+    }
+
+    const client = new Client();
+    
+    try {
+      await client.login(account.token);
+      await this.delay(2000);
+
+      // Check if account now has permission for fallback channel
+      const hasPermission = await this.checkFallbackChannelPermission(client, account.roles);
+      if (!hasPermission) {
+        console.log(`   ❌ ${account.username} still has no fallback channel permission`);
+        return account; // Keep as pending
+      }
+
+      // Try executing /profile in fallback channel
+      console.log(`   🎯 Testing fallback channel for ${account.username}...`);
+      try {
+        const response = await this.executeWithRetry(async () => {
+          return await this.executeSlashCommandInternal(client, config.FALLBACK_CHANNEL_ID!, 'profile');
+        }, 2);
+
+        if (response) {
+          if (this.isAccessRestricted(response)) {
+            // Bot restricts access due to role, but Discord API works fine
+            const requiredRole = this.extractRequiredRole(response);
+            const userRole = this.getUserSpecialRole(account.roles);
+            console.log(`   🔒 ${account.username} bot access restricted: Your role is ${userRole}, but ${requiredRole} role is required`);
+            console.log(`   ✅ ${account.username} confirmed via fallback channel (bot role restriction)`);
+            return {
+              ...account,
+              stats: { played: 0, wins: 0, winRate: 0, badgesEarned: 0 },
+              status: 'confirmed',
+              executableChannel: 'fallback'
+            };
+          } else {
+            const stats = this.parseProfileStats(response);
+            if (stats) {
+              console.log(`   ✅ ${account.username} confirmed via fallback channel`);
+              return {
+                ...account,
+                stats,
+                status: 'confirmed',
+                executableChannel: 'fallback'
+              };
+            }
+          }
+        }
+      } catch (error) {
+        console.log(`   ❌ ${account.username} fallback validation failed - removing account`);
+        return null; // Account should be removed
+      }
+
+      return account; // Keep as pending
+    } catch (error) {
+      console.log(`   ❌ ${account.username} revalidation error: ${error}`);
+      return account; // Keep as pending
+    } finally {
+      try {
+        if (client.user) {
+          await client.destroy();
+        }
+      } catch (destroyError) {
+        console.log('   ⚠️ Error during cleanup:', destroyError);
+      }
+    }
+  }
+
+  /**
+   * Performs initial validation (guild membership and roles)
+   */
+  private async performInitialValidation(client: Client, user: any): Promise<Omit<AccountData, 'stats' | 'status' | 'executableChannel'> | null> {
+    const guild = await this.withTimeout(
+      client.guilds.fetch(config.GUILD_ID),
+      10000,
+      'Guild fetch timeout'
+    ).catch(() => null);
+
+    if (!guild) {
+      console.log('   ⚠️ User not in guild or cannot access guild');
+      return null;
+    }
+
+    console.log(`   ✅ Found guild: ${guild.name}`);
+
+    const member = await this.withTimeout(
+      guild.members.fetch(user.id),
+      10000,
+      'Member fetch timeout'
+    ).catch(() => null);
+
+    if (!member) {
+      console.log('   ⚠️ Could not fetch member data');
+      return null;
+    }
+
+    console.log('   🎭 Checking roles...');
+    const userRoles = member.roles.cache.map(role => role.id);
+    console.log(`   📋 User has ${userRoles.length} roles`);
+
+    const hasRequiredRoles = config.REQUIRED_ROLES.every(roleId => {
+      const hasRole = userRoles.includes(roleId);
+      if (!hasRole) {
+        console.log(`   ❌ Missing required role: ${roleId}`);
+      }
+      return hasRole;
+    });
+
+    const hasSpecialRole = config.SPECIAL_ROLES.some(roleId => {
+      const hasRole = userRoles.includes(roleId);
+      if (hasRole) {
+        console.log(`   ✅ Has special role: ${roleId}`);
+      }
+      return hasRole;
+    });
+
+    if (!hasRequiredRoles || !hasSpecialRole) {
+      console.log('   ❌ Role requirements not met');
+      return null;
+    }
+
+    console.log('   ✅ All role requirements met');
+
+    return {
+      id: user.id,
+      token: client.token!,
+      username: user.username,
+      globalName: user.globalName || user.username,
+      roles: member.roles.cache.map(role => ({
+        id: role.id,
+        name: role.name
+      }))
+    };
+  }
+
+  /**
+   * Checks if account has VIEW_CHANNEL permission for fallback channel
+   */
+  private async checkFallbackChannelPermission(client: Client, userRoles: Array<{ id: string; name: string }>): Promise<boolean> {
+    if (!config.FALLBACK_CHANNEL_ID) return false;
+
+    try {
+      const channel = await client.channels.fetch(config.FALLBACK_CHANNEL_ID);
+      if (!channel || !('guild' in channel)) return false;
+
+      const guild = channel.guild;
+      const member = await guild.members.fetch(client.user!.id);
+      
+      // Check if any of the user's special roles grants VIEW_CHANNEL permission
+      const specialRoleIds = config.SPECIAL_ROLES;
+      const userSpecialRoles = userRoles.filter(role => specialRoleIds.includes(role.id));
+      
+      for (const userRole of userSpecialRoles) {
+        const role = guild.roles.cache.get(userRole.id);
+        if (role) {
+          const permissions = channel.permissionsFor(role);
+          if (permissions?.has('VIEW_CHANNEL')) {
+            console.log(`   ✅ Role ${role.name} grants fallback channel access`);
+            return true;
+          }
+        }
+      }
+
+      console.log('   ❌ No special roles grant fallback channel access');
+      return false;
+    } catch (error) {
+      console.log(`   ⚠️ Error checking fallback channel permission: ${error}`);
+      return false;
+    }
+  }
+
+  /**
    * Executes Discord slash command and waits for response
-   * @param account - Account to use for command execution
-   * @param commandName - Name of the slash command to execute
-   * @returns Bot response message
    */
   public async executeSlashCommand(account: AccountData, commandName: string): Promise<any> {
     const client = new Client();
     
     try {
-      console.log(`   🔐 Logging in as ${account.username}...`);
-      
       await Promise.race([
         client.login(account.token),
         new Promise((_, reject) => 
@@ -148,52 +374,9 @@ export class DiscordClient {
         )
       ]);
 
-      console.log('   ✅ Login successful');
       await this.delay(3000);
-
-      const channelId = await this.determineChannelId(client);
-      console.log(`   📡 Using channel: ${channelId}`);
-
-      console.log('   🔍 Fetching bot commands...');
-      const commandsResponse = await this.withTimeout(
-        (client as any).api.applications(config.BOT_ID).commands.get(),
-        10000,
-        'Commands fetch timeout'
-      );
-
-      const commands = commandsResponse as Array<{
-        id: string;
-        name: string;
-        version: string;
-        type: number;
-      }>;
-
-      const command = commands.find((cmd) => cmd.name === commandName);
-      if (!command) throw new Error(`${commandName} command not found`);
-
-      console.log(`   🎮 Executing /${commandName} command...`);
-
-      await (client as any).api.interactions.post({
-        data: {
-          type: 2,
-          application_id: config.BOT_ID,
-          guild_id: config.GUILD_ID,
-          channel_id: channelId,
-          session_id: (client as any).sessionId,
-          data: {
-            version: command.version,
-            id: command.id,
-            name: command.name,
-            type: command.type,
-            options: [],
-            attachments: []
-          },
-          nonce: this.generateNonce()
-        }
-      });
-
-      console.log('   📨 Command sent, waiting for response...');
-      return await this.waitForBotResponseWithUpdates(client, channelId, config.BOT_ID);
+      const channelId = this.getChannelIdForAccount(account);
+      return await this.executeSlashCommandInternal(client, channelId, commandName);
 
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -208,6 +391,60 @@ export class DiscordClient {
         console.log('   ⚠️ Error during cleanup:', destroyError);
       }
     }
+  }
+
+  /**
+   * Internal method to execute slash command in specific channel
+   */
+  private async executeSlashCommandInternal(client: Client, channelId: string, commandName: string): Promise<any> {
+    const commandsResponse = await this.withTimeout(
+      (client as any).api.applications(config.BOT_ID).commands.get(),
+      10000,
+      'Commands fetch timeout'
+    );
+
+    const commands = commandsResponse as Array<{
+      id: string;
+      name: string;
+      version: string;
+      type: number;
+    }>;
+
+    const command = commands.find((cmd) => cmd.name === commandName);
+    if (!command) throw new Error(`${commandName} command not found`);
+
+    await (client as any).api.interactions.post({
+      data: {
+        type: 2,
+        application_id: config.BOT_ID,
+        guild_id: config.GUILD_ID,
+        channel_id: channelId,
+        session_id: (client as any).sessionId,
+        data: {
+          version: command.version,
+          id: command.id,
+          name: command.name,
+          type: command.type,
+          options: [],
+          attachments: []
+        },
+        nonce: this.generateNonce()
+      }
+    });
+
+    return await this.waitForBotResponseWithUpdates(client, channelId, config.BOT_ID);
+  }
+
+  /**
+   * Gets the appropriate channel ID for account based on executableChannel
+   */
+  private getChannelIdForAccount(account: AccountData): string {
+    if (account.executableChannel === 'general') {
+      return config.GENERAL_CHANNEL_ID;
+    } else if (account.executableChannel === 'fallback' && config.FALLBACK_CHANNEL_ID) {
+      return config.FALLBACK_CHANNEL_ID;
+    }
+    throw new Error(`No valid channel configured for account ${account.username}`);
   }
 
   /**
@@ -293,6 +530,32 @@ export class DiscordClient {
   }
 
   /**
+   * Extracts required role from access restricted message
+   */
+  private extractRequiredRole(message: any): string {
+    if (message.embeds && message.embeds[0] && message.embeds[0].fields) {
+      const requiredRoleField = message.embeds[0].fields.find((field: any) => 
+        field.name?.includes('Required Role')
+      );
+      if (requiredRoleField && requiredRoleField.value) {
+        // Extract role name from "You need the **Echo** role to use this bot."
+        const roleMatch = requiredRoleField.value.match(/\*\*([^*]+)\*\*/);
+        return roleMatch ? roleMatch[1] : 'unknown role';
+      }
+    }
+    return 'unknown role';
+  }
+
+  /**
+   * Gets user's special role name
+   */
+  private getUserSpecialRole(userRoles: Array<{ id: string; name: string }>): string {
+    const specialRoleIds = config.SPECIAL_ROLES;
+    const userSpecialRole = userRoles.find(role => specialRoleIds.includes(role.id));
+    return userSpecialRole ? userSpecialRole.name : 'unknown role';
+  }
+
+  /**
    * Extracts numeric value from embed field using regex
    */
   private extractNumberFromField(fields: any[], regex: RegExp): number | null {
@@ -301,43 +564,6 @@ export class DiscordClient {
 
     const match = field.value.match(/\*\*(\d+(?:\.\d+)?)\*\*/);
     return match ? parseFloat(match[1]) : null;
-  }
-
-  /**
-   * Determines appropriate channel ID for commands
-   */
-  private async determineChannelId(client: Client): Promise<string> {
-    try {
-      const channel = await this.withTimeout(
-        client.channels.fetch(config.GENERAL_CHANNEL_ID),
-        5000,
-        'Channel fetch timeout'
-      );
-      
-      if (channel && 'guild' in channel) {
-        return config.GENERAL_CHANNEL_ID;
-      }
-    } catch (error) {
-      console.log('   ⚠️ Cannot access general channel, trying fallback...');
-    }
-
-    if (config.FALLBACK_CHANNEL_ID) {
-      try {
-        const channel = await this.withTimeout(
-          client.channels.fetch(config.FALLBACK_CHANNEL_ID),
-          5000,
-          'Fallback channel fetch timeout'
-        );
-        
-        if (channel && 'guild' in channel) {
-          return config.FALLBACK_CHANNEL_ID;
-        }
-      } catch (error) {
-        console.log('   ⚠️ Cannot access fallback channel either');
-      }
-    }
-
-    throw new Error('No accessible channel found');
   }
 
   /**
@@ -360,16 +586,13 @@ export class DiscordClient {
 
       const messageHandler = (message: any) => {
         if (message.channel.id === channelId && message.author.id === botId) {
-          console.log(`   📩 Received message from bot (flags: ${message.flags?.bitfield || 'none'})`);
           lastMessage = message;
           
           if (message.flags?.bitfield === 192) {
-            console.log('   ⏳ Received loading message, waiting for update...');
-            return;
+            return; // Loading message, wait for update
           }
           
           if (message.flags?.bitfield === 64 || !message.flags?.bitfield) {
-            console.log('   ✅ Received final message');
             cleanup();
             resolve(message);
           }
@@ -382,10 +605,7 @@ export class DiscordClient {
             lastMessage && 
             lastMessage.id === newMessage.id) {
           
-          console.log(`   🔄 Message updated (flags: ${oldMessage.flags?.bitfield || 'none'} → ${newMessage.flags?.bitfield || 'none'})`);
-          
           if (oldMessage.flags?.bitfield === 192 && newMessage.flags?.bitfield === 64) {
-            console.log('   ✅ Message updated from loading to ready');
             cleanup();
             resolve(newMessage);
           }
