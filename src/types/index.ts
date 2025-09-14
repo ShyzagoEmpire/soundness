@@ -72,3 +72,42 @@ export interface GameExecutionResult {
   accessRestricted?: boolean;
   error?: string;
 }
+
+/**
+ * Discord message analysis result
+ */
+export interface MessageAnalysis {
+  isRateLimited: boolean;
+  isAccessRestricted: boolean;
+  hasValidResponse: boolean;
+  errorType?: 'RATE_LIMIT' | 'ACCESS_DENIED' | 'BOT_RESTRICTION' | 'INVALID_RESPONSE';
+  requiredRole?: string;
+  userRole?: string;
+}
+
+/**
+ * Channel execution context
+ */
+export interface ChannelContext {
+  id: string;
+  name: 'general' | 'fallback';
+  hasPermission: boolean;
+}
+
+/**
+ * Discord client operation result
+ */
+export interface ClientOperationResult<T = any> {
+  success: boolean;
+  data?: T;
+  error?: string;
+}
+
+/**
+ * Account validation result
+ */
+export interface ValidationResult {
+  account?: AccountData;
+  shouldDiscard: boolean;
+  reason?: string;
+}

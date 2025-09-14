@@ -6,11 +6,12 @@ import { DiscordClient } from '../services/DiscordClient';
 import { GameSolver } from '../services/GameSolver';
 import { GameAPIClient } from '../services/GameAPIClient';
 import { CLIExecutor } from '../services/CLIExecutor';
-import { AccountData } from '../types';
+import { AccountData, GameExecutionResult } from '../types';
 import { config } from '../config/environment';
+import { Utils, ErrorHandler, MessageAnalyzer } from '../utils';
 
 /**
- * Main automation engine with zero redundancy and optimized performance
+ * Main automation engine with streamlined architecture and improved error handling
  */
 export class AutomationEngine {
   private accountManager: AccountManager;
@@ -32,7 +33,7 @@ export class AutomationEngine {
    * Starts the automation process with initial setup and continuous cycles
    */
   public async start(): Promise<void> {
-    console.log('\n🎮 Soundness Automation v3.0\n');
+    console.log('\n🎮 Soundness Automation v3.0 (Refactored)\n');
 
     try {
       await this.validateKeyStore();
@@ -44,8 +45,7 @@ export class AutomationEngine {
 
       await this.startContinuousCycle();
     } catch (error) {
-      console.error('❌ Automation failed:', error);
-      process.exit(1);
+      ErrorHandler.handle(error, 'Automation startup');
     }
   }
 
@@ -67,7 +67,7 @@ export class AutomationEngine {
       process.exit(1);
     }
 
-    console.log('✅ key_store.json found');
+    ErrorHandler.log('key_store.json found', 'Setup');
   }
 
   /**
@@ -86,17 +86,14 @@ export class AutomationEngine {
    * Checks for existing accounts and prompts user for action
    */
   private async checkExistingAccountsAndPrompt(): Promise<boolean> {
-    const existingAccounts = this.accountManager.getAccounts();
-    const confirmedAccounts = existingAccounts.filter(acc => 
-      acc.id && acc.token && acc.status === 'confirmed'
-    );
+    const confirmedAccounts = this.accountManager.getAccountsByStatus('confirmed');
 
     if (confirmedAccounts.length === 0) {
-      console.log('📋 No existing confirmed accounts found');
+      ErrorHandler.log('No existing confirmed accounts found', 'Setup');
       return true;
     }
 
-    console.log(`📋 Found ${confirmedAccounts.length} existing confirmed account(s):`);
+    ErrorHandler.log(`Found ${confirmedAccounts.length} existing confirmed account(s):`, 'Setup');
     confirmedAccounts.forEach(acc => {
       console.log(`   👤 ${acc.username} (${acc.globalName}) - Status: ${acc.status} - Channel: ${acc.executableChannel}`);
     });
@@ -131,7 +128,7 @@ export class AutomationEngine {
 
       if (token.trim()) {
         tokens.push(token.trim());
-        console.log(`✅ Token added (${tokens.length} total)`);
+        ErrorHandler.log(`Token added (${tokens.length} total)`, 'TokenCollection');
       }
 
       const { continueAdding } = await inquirer.prompt([{
@@ -144,7 +141,7 @@ export class AutomationEngine {
       if (continueAdding === 'Nah, that\'s enough') break;
     }
 
-    console.log(`\n📊 Collected ${tokens.length} tokens for processing\n`);
+    ErrorHandler.log(`Collected ${tokens.length} tokens for processing`, 'TokenCollection');
     return tokens;
   }
 
@@ -153,47 +150,49 @@ export class AutomationEngine {
    */
   private async processTokens(tokens: string[]): Promise<void> {
     if (tokens.length === 0) {
-      console.log('📊 No new tokens to process\n');
+      ErrorHandler.log('No new tokens to process', 'TokenProcessing');
       return;
     }
 
-    console.log('🔄 Processing collected tokens...\n');
+    ErrorHandler.log('Processing collected tokens...', 'TokenProcessing');
 
     for (let i = 0; i < tokens.length; i++) {
       const token = tokens[i];
       console.log(`Processing token ${i + 1}/${tokens.length}...`);
 
+      // Skip if token already exists
       const existingAccount = this.accountManager.getAccounts().find(acc => acc.token === token);
       if (existingAccount) {
-        console.log(`⚠️ Token already exists for user: ${existingAccount.username}`);
+        ErrorHandler.warn(`Token already exists for user: ${existingAccount.username}`, 'TokenProcessing');
         continue;
       }
 
+      // Validate new token
       const accountData = await this.discordClient.validateAccount(token);
       if (accountData) {
         this.accountManager.addOrUpdateAccount(accountData);
         const statusText = accountData.status === 'confirmed' 
           ? `confirmed (${accountData.executableChannel} channel)` 
           : 'pending';
-        console.log(`✅ Account ${accountData.username} validated successfully - ${statusText}`);
+        ErrorHandler.log(`Account ${accountData.username} validated successfully - ${statusText}`, 'TokenProcessing');
       } else {
-        console.log('❌ Failed to validate token - token discarded');
+        ErrorHandler.warn('Failed to validate token - token discarded', 'TokenProcessing');
       }
 
       if (i < tokens.length - 1) {
-        await this.delay(config.COMMAND_DELAY);
+        await Utils.delay(config.COMMAND_DELAY);
       }
     }
 
     this.accountManager.saveAccounts();
-    console.log('\n📊 Token processing complete!\n');
+    ErrorHandler.log('Token processing complete!', 'TokenProcessing');
   }
 
   /**
    * Starts continuous automation cycles
    */
   private async startContinuousCycle(): Promise<void> {
-    console.log('🔄 Starting continuous automation cycle...\n');
+    ErrorHandler.log('Starting continuous automation cycle...', 'Cycle');
 
     await this.runCycle();
 
@@ -207,7 +206,7 @@ export class AutomationEngine {
    */
   private async runCycle(): Promise<void> {
     const cycleStart = new Date();
-    console.log(`\n⏰ Cycle started at ${cycleStart.toLocaleString()}\n`);
+    ErrorHandler.log(`Cycle started at ${cycleStart.toLocaleString()}`, 'Cycle');
 
     try {
       let accountsModified = false;
@@ -229,7 +228,7 @@ export class AutomationEngine {
           accountsModified = true;
         }
       } else {
-        console.log('📊 Skipping profile sync (no games played)\n');
+        ErrorHandler.log('Skipping profile sync (no games played)', 'Cycle');
       }
 
       // Save accounts only once per cycle if any changes were made
@@ -238,12 +237,12 @@ export class AutomationEngine {
       }
 
       const nextCycle = new Date(Date.now() + config.RETRY_INTERVAL);
-      console.log(`\n✅ Cycle completed successfully`);
-      console.log(`🕐 Next cycle starts at ${nextCycle.toLocaleString()}\n`);
+      ErrorHandler.log(`Cycle completed successfully`, 'Cycle');
+      ErrorHandler.log(`Next cycle starts at ${nextCycle.toLocaleString()}`, 'Cycle');
     } catch (error) {
-      console.error('❌ Cycle failed:', error);
+      ErrorHandler.warn(`Cycle failed: ${error}`, 'Cycle');
       const nextCycle = new Date(Date.now() + config.RETRY_INTERVAL);
-      console.log(`🕐 Next cycle starts at ${nextCycle.toLocaleString()}\n`);
+      ErrorHandler.log(`Next cycle starts at ${nextCycle.toLocaleString()}`, 'Cycle');
     }
   }
 
@@ -254,7 +253,7 @@ export class AutomationEngine {
     const confirmedAccounts = this.accountManager.getAccountsByStatus('confirmed');
     
     if (confirmedAccounts.length === 0) {
-      console.log('✅ No confirmed accounts found');
+      ErrorHandler.log('No confirmed accounts found', 'Cycle');
       return null;
     }
     
@@ -271,7 +270,7 @@ export class AutomationEngine {
       return false;
     }
 
-    console.log(`🔄 Processing ${pendingAccounts.length} pending account(s)...\n`);
+    ErrorHandler.log(`Processing ${pendingAccounts.length} pending account(s)...`, 'PendingAccounts');
     let accountsModified = false;
 
     for (const account of pendingAccounts) {
@@ -283,27 +282,26 @@ export class AutomationEngine {
         if (!revalidatedAccount) {
           // Account should be removed
           this.accountManager.removeAccount(account.id);
-          console.log(`❌ Removed ${account.username} - failed revalidation`);
+          ErrorHandler.log(`Removed ${account.username} - failed revalidation`, 'PendingAccounts');
           accountsModified = true;
         } else if (revalidatedAccount.status === 'confirmed') {
           // Account was promoted to confirmed
           this.accountManager.addOrUpdateAccount(revalidatedAccount);
-          console.log(`✅ ${account.username} promoted to confirmed status (${revalidatedAccount.executableChannel} channel)`);
+          ErrorHandler.log(`${account.username} promoted to confirmed status (${revalidatedAccount.executableChannel} channel)`, 'PendingAccounts');
           accountsModified = true;
         } else {
           // Account remains pending
-          console.log(`⏳ ${account.username} remains pending`);
+          ErrorHandler.log(`${account.username} remains pending`, 'PendingAccounts');
         }
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.log(`⚠️ Revalidation error for ${account.username}: ${errorMessage}`);
+        ErrorHandler.warn(`Revalidation error for ${account.username}: ${error}`, 'PendingAccounts');
       }
 
-      await this.delay(config.COMMAND_DELAY);
+      await Utils.delay(config.COMMAND_DELAY);
     }
 
     if (accountsModified) {
-      console.log('\n📊 Pending accounts processing complete!\n');
+      ErrorHandler.log('Pending accounts processing complete!', 'PendingAccounts');
     }
     return accountsModified;
   }
@@ -312,7 +310,7 @@ export class AutomationEngine {
    * Executes 8queens commands for confirmed accounts only
    */
   private async execute8QueensCommands(): Promise<{ gamesPlayed: boolean; accountsModified: boolean }> {
-    console.log('🎮 Executing /8queens commands...\n');
+    ErrorHandler.log('Executing /8queens commands...', 'Gaming');
 
     const confirmedAccounts = this.getConfirmedAccounts();
     if (!confirmedAccounts) {
@@ -328,20 +326,20 @@ export class AutomationEngine {
       const result = await this.executeGameSequence(account);
       
       if (result.success) {
-        console.log(`✅ 8queens completed for ${account.username}`);
+        ErrorHandler.log(`8queens completed for ${account.username}`, 'Gaming');
         anyGamesPlayed = true;
       } else if (result.rateLimited) {
-        console.log(`⏰ ${account.username} rate limited - too many games played recently (expected behavior)`);
+        ErrorHandler.log(`${account.username} rate limited - too many games played recently (expected behavior)`, 'Gaming');
       } else if (result.accessRestricted) {
-        console.log(`🔒 ${account.username} access restricted - bot role restriction (expected behavior)`);
+        ErrorHandler.log(`${account.username} access restricted - bot role restriction (expected behavior)`, 'Gaming');
       } else {
-        console.log(`❌ 8queens failed for ${account.username}`);
+        ErrorHandler.warn(`8queens failed for ${account.username}: ${result.error || 'Unknown error'}`, 'Gaming');
       }
 
-      await this.delay(config.COMMAND_DELAY);
+      await Utils.delay(config.COMMAND_DELAY);
     }
 
-    console.log('\n🎯 8queens execution complete!\n');
+    ErrorHandler.log('8queens execution complete!', 'Gaming');
     return { gamesPlayed: anyGamesPlayed, accountsModified };
   }
 
@@ -349,11 +347,11 @@ export class AutomationEngine {
    * Updates profile statistics after game completion
    */
   private async executeProfileCommands(): Promise<boolean> {
-    console.log('📊 Updating post-game statistics...\n');
+    ErrorHandler.log('Updating post-game statistics...', 'ProfileSync');
 
     const confirmedAccounts = this.getConfirmedAccounts();
     if (!confirmedAccounts) {
-      console.log('📋 No confirmed accounts for stats update');
+      ErrorHandler.log('No confirmed accounts for stats update', 'ProfileSync');
       return false;
     }
 
@@ -366,8 +364,10 @@ export class AutomationEngine {
         const response = await this.discordClient.executeSlashCommand(account, 'profile');
         
         if (response) {
-          if (this.discordClient.isAccessRestricted(response)) {
-            console.log(`🔒 ${account.username} access restricted - bot role restriction (keeping account)`);
+          const analysis = MessageAnalyzer.analyze(response, account.roles);
+          
+          if (analysis.isAccessRestricted) {
+            ErrorHandler.log(`${account.username} access restricted - bot role restriction (keeping account)`, 'ProfileSync');
             continue;
           }
 
@@ -382,54 +382,54 @@ export class AutomationEngine {
             const winsGained = stats.wins - oldStats.wins;
             
             if (gamesPlayed > 0 || winsGained > 0) {
-              console.log(`✅ Stats updated for ${account.username}:`);
+              ErrorHandler.log(`Stats updated for ${account.username}:`, 'ProfileSync');
               console.log(`   Games: ${oldStats.played} → ${stats.played} (+${gamesPlayed})`);
               console.log(`   Wins: ${oldStats.wins} → ${stats.wins} (+${winsGained})`);
             } else {
-              console.log(`📊 No stat changes for ${account.username}`);
+              ErrorHandler.log(`No stat changes for ${account.username}`, 'ProfileSync');
             }
           } else {
-            console.log(`⚠️ Could not parse stats for ${account.username}`);
+            ErrorHandler.warn(`Could not parse stats for ${account.username}`, 'ProfileSync');
           }
         } else {
-          console.log(`⚠️ No response received for ${account.username}`);
+          ErrorHandler.warn(`No response received for ${account.username}`, 'ProfileSync');
         }
       } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        console.log(`⚠️ Stats update failed for ${account.username}: ${errorMessage}`);
+        ErrorHandler.warn(`Stats update failed for ${account.username}: ${error}`, 'ProfileSync');
       }
 
-      await this.delay(config.COMMAND_DELAY);
+      await Utils.delay(config.COMMAND_DELAY);
     }
 
-    console.log('\n📊 Stats update complete!\n');
+    ErrorHandler.log('Stats update complete!', 'ProfileSync');
     return accountsModified;
   }
 
   /**
    * Executes complete game sequence for a single account
    */
-  private async executeGameSequence(account: AccountData): Promise<{
-    success: boolean;
-    rateLimited?: boolean;
-    accessRestricted?: boolean;
-  }> {
+  private async executeGameSequence(account: AccountData): Promise<GameExecutionResult> {
     try {
       console.log('   📡 Sending /8queens command...');
       const gameResponse = await this.discordClient.executeSlashCommand(account, '8queens');
       
-      if (this.discordClient.isGameRateLimited(gameResponse)) {
+      // Analyze response using unified analyzer
+      const analysis = MessageAnalyzer.analyze(gameResponse, account.roles);
+      
+      if (analysis.isRateLimited) {
         console.log('   ⏰ Rate limited - too many games played recently');
         return { success: false, rateLimited: true };
       }
 
-      if (this.discordClient.isAccessRestricted(gameResponse)) {
+      if (analysis.isAccessRestricted) {
         console.log('   🔒 Access restricted - bot role restriction');
         return { success: false, accessRestricted: true };
       }
 
       const gameInfo = this.discordClient.extractGameInfo(gameResponse);
-      if (!gameInfo) throw new Error('Could not extract game info');
+      if (!gameInfo) {
+        throw new Error('Could not extract game info');
+      }
 
       console.log(`   🎮 Game created: ${gameInfo.gameId}`);
 
@@ -448,17 +448,21 @@ export class AutomationEngine {
       const cliCommand = await this.gameApiClient.pollForCLICommand(victoryUrl);
 
       console.log('   ⚙️ Executing blockchain transaction...');
-      const keyName = account.username.toLowerCase().replace(/[^a-z0-9]/g, '_');
+      const keyName = this.generateKeyName(account.username);
       await this.cliExecutor.executeCommand(cliCommand, keyName);
 
       return { success: true };
     } catch (error) {
-      console.log(`   ❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      return { success: false };
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.log(`   ❌ Error: ${errorMessage}`);
+      return { success: false, error: errorMessage };
     }
   }
 
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  /**
+   * Generates safe key name from username
+   */
+  private generateKeyName(username: string): string {
+    return username.toLowerCase().replace(/[^a-z0-9]/g, '_');
   }
 }

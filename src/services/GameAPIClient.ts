@@ -1,14 +1,23 @@
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import { config } from '../config/environment';
+import { Utils, ErrorHandler } from '../utils';
 
 /**
- * Handles HTTP communication with the Soundness game API with clean separated polling
+ * Handles HTTP communication with the Soundness game API
  */
 export class GameAPIClient {
   private axiosInstance: AxiosInstance;
+  private readonly MAX_ATTEMPTS = 2160; // 3 hours at 5s intervals
 
   constructor() {
-    this.axiosInstance = axios.create({
+    this.axiosInstance = this.createAxiosInstance();
+  }
+
+  /**
+   * Creates configured axios instance
+   */
+  private createAxiosInstance(): AxiosInstance {
+    return axios.create({
       baseURL: config.API_BASE_URL,
       timeout: 30000,
       headers: {
@@ -30,13 +39,13 @@ export class GameAPIClient {
 
   /**
    * Submits game completion and polls until victory URL is ready
-   * @param gameId - Unique game identifier
-   * @param solution - Solution string for the puzzle
-   * @param stats - Game statistics object
-   * @returns Victory page URL
    */
-  public async submitGameCompletion(gameId: string, solution: string, stats: any): Promise<string> {
-    console.log(`   📤 Submitting game completion for ${gameId}...`);
+  public async submitGameCompletion(
+    gameId: string, 
+    solution: string, 
+    stats: any
+  ): Promise<string> {
+    ErrorHandler.log(`Submitting game completion for ${gameId}...`, 'GameAPI');
     
     const payload = new URLSearchParams({
       game_id: gameId,
@@ -44,194 +53,133 @@ export class GameAPIClient {
       stats: JSON.stringify(stats)
     });
 
-    return await this.pollUntilComplete({
-      makeRequest: () => this.axiosInstance.post('/api/game_completed', payload, {
+    return await this.pollForResult({
+      requestFactory: () => this.axiosInstance.post('/api/game_completed', payload, {
         headers: { 'referer': `https://fun.soundness.xyz/game/${gameId}` }
       }),
-      processResponse: (html) => this.processVictoryResponse(html),
-      type: 'victory',
-      errorName: 'Victory URL'
+      resultExtractor: (response) => this.extractVictoryUrl(response),
+      progressMessage: 'Still generating victory URL...',
+      successMessage: 'Victory URL ready',
+      errorContext: 'Victory URL generation'
     });
   }
 
   /**
    * Polls for CLI command until ready
-   * @param victoryUrl - Victory page URL to poll
-   * @returns CLI command string
    */
   public async pollForCLICommand(victoryUrl: string): Promise<string> {
-    console.log(`   📄 Waiting for proof generation...`);
+    ErrorHandler.log('Waiting for proof generation...', 'GameAPI');
     
-    // Extract relative path from victory URL
     const url = new URL(victoryUrl);
     const relativePath = url.pathname;
     
-    return await this.pollUntilComplete({
-      makeRequest: () => this.axiosInstance.get(relativePath),
-      processResponse: (html) => this.processCLIResponse(html),
-      type: 'cli',
-      errorName: 'CLI command'
+    return await this.pollForResult({
+      requestFactory: () => this.axiosInstance.get(relativePath),
+      resultExtractor: (response) => this.extractCLICommand(response),
+      progressMessage: 'Still generating CLI command...',
+      successMessage: 'CLI command ready',
+      errorContext: 'CLI command generation'
     });
   }
 
   /**
-   * Unified polling method
+   * Generic polling method for API results
    */
-  private async pollUntilComplete<T>({ makeRequest, processResponse, type, errorName }: {
-    makeRequest: () => Promise<any>;
-    processResponse: (html: string) => { result?: T; shouldContinue: boolean; logMessage?: string };
-    type: 'victory' | 'cli';
-    errorName: string;
+  private async pollForResult<T>({
+    requestFactory,
+    resultExtractor,
+    progressMessage,
+    successMessage,
+    errorContext
+  }: {
+    requestFactory: () => Promise<AxiosResponse>;
+    resultExtractor: (response: AxiosResponse) => T | null;
+    progressMessage: string;
+    successMessage: string;
+    errorContext: string;
   }): Promise<T> {
     let attemptCount = 0;
-    const maxAttempts = 2160; // 3 hours
     const startTime = Date.now();
 
-    while (attemptCount < maxAttempts) {
+    while (attemptCount < this.MAX_ATTEMPTS) {
       attemptCount++;
       const elapsedMinutes = this.getElapsedMinutes(startTime);
       
       try {
-        const response = await makeRequest();
+        const response = await requestFactory();
 
-        // Handle status codes
-        const statusResult = this.handleStatusCode(response, type);
-        if (statusResult.shouldStop) {
-          if (statusResult.error) throw new Error(statusResult.error);
-          if (statusResult.result) return statusResult.result as T;
+        // Handle immediate redirects (victory URL ready)
+        if (response.status === 302 && response.headers.location) {
+          const victoryUrl = new URL(response.headers.location, config.API_BASE_URL).href;
+          ErrorHandler.log(`${successMessage} after ${elapsedMinutes}m: ${victoryUrl}`, 'GameAPI');
+          return victoryUrl as T;
+        }
+
+        // Handle error status codes
+        if (response.status === 404) {
+          throw new Error(`Resource not found (404)`);
+        }
+
+        if (response.status >= 400) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
         }
 
         // Handle 200 OK response
         if (response.status === 200) {
           const html = response.data;
           
-          // Check failure states (only for CLI)
-          if (type === 'cli') {
-            this.checkFailureStates(html);
+          // Check for failure states
+          this.checkForFailureStates(html);
+          
+          // Try to extract result
+          const result = resultExtractor(response);
+          if (result) {
+            ErrorHandler.log(`${successMessage} after ${elapsedMinutes}m (attempt ${attemptCount})`, 'GameAPI');
+            return result;
           }
           
-          // Process response based on type
-          const processResult = processResponse(html);
-          if (processResult.result) {
-            console.log(`   ✅ ${errorName} ready after ${elapsedMinutes}m (attempt ${attemptCount})`);
-            return processResult.result;
-          }
-          
-          // Log progress if needed
-          if (processResult.logMessage && attemptCount % 60 === 0) {
-            console.log(`   ⏳ ${processResult.logMessage} ${elapsedMinutes}m elapsed (attempt ${attemptCount}/${maxAttempts})`);
+          // Log progress periodically
+          if (attemptCount % 60 === 0) {
+            ErrorHandler.log(`${progressMessage} ${elapsedMinutes}m elapsed (attempt ${attemptCount}/${this.MAX_ATTEMPTS})`, 'GameAPI');
           }
         }
 
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        this.handlePollingError(errorMessage);
+        
+        // Stop immediately for known error conditions
+        if (this.shouldStopPolling(errorMessage)) {
+          throw new Error(`${errorContext} failed: ${errorMessage}`);
+        }
+        
+        // Continue silently for network errors
+        if (attemptCount % 120 === 0) { // Log every 10 minutes for network errors
+          ErrorHandler.warn(`Network error (continuing): ${errorMessage}`, 'GameAPI');
+        }
       }
 
-      await this.delay(5000);
+      await Utils.delay(5000);
     }
 
     const totalMinutes = this.getElapsedMinutes(startTime);
-    throw new Error(`${errorName} timeout after ${totalMinutes} minutes (${maxAttempts} attempts)`);
+    throw new Error(`${errorContext} timeout after ${totalMinutes} minutes (${this.MAX_ATTEMPTS} attempts)`);
   }
 
   /**
-   * Processes victory URL response
+   * Extracts victory URL from response
    */
-  private processVictoryResponse(html: string): { result?: string; shouldContinue: boolean; logMessage?: string } {
-    if (this.isWaitingState(html)) {
-      return { shouldContinue: true, logMessage: 'Still generating victory URL...' };
-    }
-    
-    return { shouldContinue: true, logMessage: 'Unexpected response state, continuing...' };
-  }
-
-  /**
-   * Processes CLI command response
-   */
-  private processCLIResponse(html: string): { result?: string; shouldContinue: boolean; logMessage?: string } {
-    const cliCommand = this.extractCLICommand(html);
-    if (cliCommand) {
-      return { result: cliCommand, shouldContinue: false };
-    }
-    
-    if (this.isWaitingState(html)) {
-      return { shouldContinue: true, logMessage: 'Still generating CLI...' };
-    }
-    
-    return { shouldContinue: true, logMessage: 'CLI command not ready yet...' };
-  }
-
-  /**
-   * Calculates elapsed minutes
-   */
-  private getElapsedMinutes(startTime: number): number {
-    return Math.floor((Date.now() - startTime) / 60000);
-  }
-
-  /**
-   * Handles HTTP status codes
-   */
-  private handleStatusCode(response: any, type: 'victory' | 'cli'): {
-    shouldStop: boolean;
-    error?: string;
-    result?: string;
-  } {
-    if (response.status === 404) {
-      const errorMsg = type === 'victory' ? 'Game not found' : 'Victory page not found';
-      return { shouldStop: true, error: errorMsg };
-    }
-
-    if (response.status >= 400) {
-      return { shouldStop: true, error: `HTTP ${response.status}: ${response.statusText}` };
-    }
-
-    // Handle 302 redirect (victory URL ready)
+  private extractVictoryUrl(response: AxiosResponse): string | null {
     if (response.status === 302 && response.headers.location) {
-      const victoryUrl = new URL(response.headers.location, config.API_BASE_URL).href;
-      const elapsedMinutes = this.getElapsedMinutes(Date.now() - 60000); // Rough estimate
-      console.log(`   ✅ Victory URL ready after ${elapsedMinutes}m: ${victoryUrl}`);
-      return { shouldStop: true, result: victoryUrl };
+      return new URL(response.headers.location, config.API_BASE_URL).href;
     }
-
-    return { shouldStop: false };
-  }
-
-  /**
-   * Checks for failure states in HTML
-   */
-  private checkFailureStates(html: string): void {
-    if (html.includes('Proof generation failed - no blob ID available')) {
-      throw new Error('Proof generation failed - no blob ID available');
-    }
-  }
-
-  /**
-   * Checks for waiting states in HTML
-   */
-  private isWaitingState(html: string): boolean {
-    return html.includes('Generating zero-knowledge proof') || 
-           html.includes('Your victory page is being created. Please wait') ||
-           html.includes('🔄 Generating proof and uploading to Walrus');
-  }
-
-  /**
-   * Handles polling errors
-   */
-  private handlePollingError(errorMessage: string): void {
-    // Stop immediately for known error conditions
-    if (errorMessage.includes('not found') || 
-        errorMessage.includes('failed') || 
-        errorMessage.includes('HTTP')) {
-      throw new Error(errorMessage);
-    }
-    // Continue silently for network errors
+    return null;
   }
 
   /**
    * Extracts CLI command from HTML response
    */
-  private extractCLICommand(html: string): string | null {
+  private extractCLICommand(response: AxiosResponse): string | null {
+    const html = response.data;
     if (!html || typeof html !== 'string') return null;
 
     const codeBlockRegex = /<code[^>]*>(.*?)<\/code>/s;
@@ -242,6 +190,13 @@ export class GameAPIClient {
     let rawCommand = matches[1];
     if (!rawCommand.includes('soundness-cli send')) return null;
 
+    return this.cleanHTMLCommand(rawCommand);
+  }
+
+  /**
+   * Cleans HTML entities from command string
+   */
+  private cleanHTMLCommand(rawCommand: string): string {
     return rawCommand
       .replace(/&quot;/g, '"')
       .replace(/&amp;/g, '&')
@@ -252,7 +207,43 @@ export class GameAPIClient {
       .trim();
   }
 
-  private delay(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  /**
+   * Checks for failure states in HTML response
+   */
+  private checkForFailureStates(html: string): void {
+    const failureStates = [
+      'Proof generation failed - no blob ID available',
+      'Game completion failed',
+      'Invalid game state'
+    ];
+
+    for (const failureState of failureStates) {
+      if (html.includes(failureState)) {
+        throw new Error(failureState);
+      }
+    }
+  }
+
+  /**
+   * Determines if polling should stop based on error message
+   */
+  private shouldStopPolling(errorMessage: string): boolean {
+    const stopConditions = [
+      'not found',
+      'failed',
+      'HTTP 4',
+      'HTTP 5',
+      'Proof generation failed',
+      'Invalid game state'
+    ];
+
+    return stopConditions.some(condition => errorMessage.includes(condition));
+  }
+
+  /**
+   * Calculates elapsed minutes from start time
+   */
+  private getElapsedMinutes(startTime: number): number {
+    return Math.floor((Date.now() - startTime) / 60000);
   }
 }
